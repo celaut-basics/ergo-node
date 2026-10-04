@@ -35,16 +35,19 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 SERVICE="${HERE}/../service"
 
-PASSED=0
-FAILED=0
+# One line per check, in a file and not in a variable: several checks run in a
+# subshell, and a counter that a subshell increments is lost when it exits. A failure
+# there was not counted.
+RESULTS=$(mktemp)
+trap 'rm -f "$RESULTS"' EXIT
 
 ok() {
-    PASSED=$(( PASSED + 1 ))
+    echo ok >> "$RESULTS"
     printf '  ok    %s\n' "$1"
 }
 
 no() {
-    FAILED=$(( FAILED + 1 ))
+    echo no >> "$RESULTS"
     printf '  FAIL  %s\n' "$1"
     printf '        expected: %s\n' "$2"
     printf '        got:      %s\n' "$3"
@@ -297,5 +300,7 @@ lacks "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='abandon abandon about'
       'the mnemonic is never quoted back, not even in the error about it'
 
 echo
+PASSED=$(grep -c '^ok$' "$RESULTS" || true)
+FAILED=$(grep -c '^no$' "$RESULTS" || true)
 printf '%s passed, %s failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]

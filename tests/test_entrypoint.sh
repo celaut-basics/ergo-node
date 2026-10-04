@@ -239,6 +239,19 @@ contains "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=signet")" 'is not one of mai
          'an unknown network is refused'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_MAX_HEAP=lots")" 'is not a JVM heap size' \
          'a malformed heap size is refused before the JVM sees it'
+for bad in 3 3GB 1G2G G 0G '3 G'; do
+    contains "$(env_error "ERGO_API_KEY=k; ERGO_MAX_HEAP='${bad}'")" 'is not a JVM heap size' \
+             "the heap size '${bad}' is refused"
+done
+(
+    unset ERGO_MAX_HEAP
+    ERGO_API_KEY=k read_environment
+    is "$HEAP_FLAG" '-XX:MaxRAMPercentage=60.0' 'with no heap size, the heap is a share of the RAM of the guest'
+)
+(
+    ERGO_API_KEY=k ERGO_MAX_HEAP=2048m read_environment
+    is "$HEAP_FLAG" '-Xmx2048m' 'a heap size is given to the JVM as -Xmx'
+)
 contains "$(env_error "ERGO_API_KEY=k; ERGO_BLOCKS_TO_KEEP=some")" 'whole number of blocks' \
          'a malformed blocksToKeep is refused'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'")" 'ERGO_WALLET_PASSWORD is not' \

@@ -114,11 +114,19 @@ read_environment() {
     NODE_NAME="${ERGO_NODE_NAME:-}"
     NODE_NAME="${NODE_NAME:-celaut-ergo-node}"
 
-    MAX_HEAP="${ERGO_MAX_HEAP:-3G}"
-    case "$MAX_HEAP" in
-        [1-9]*[MmGg]) : ;;
-        *) fail "ERGO_MAX_HEAP='${MAX_HEAP}' is not a JVM heap size such as 3G or 2048M" ;;
-    esac
+    # The JVM heap. Empty means a share of the RAM of the guest, which is the
+    # `at_init.mem_limit` of service.json. nodo boots the microVM with that RAM and does
+    # not add more unless the service asks for it, so a fixed default would be too
+    # large on a small instance and too small on a large one. The rest of the RAM is
+    # for RocksDB, the JIT and the threads, which are outside the heap.
+    MAX_HEAP="${ERGO_MAX_HEAP:-}"
+    HEAP_FLAG='-XX:MaxRAMPercentage=60.0'
+    if [ -n "$MAX_HEAP" ]; then
+        case "$MAX_HEAP" in
+            *[!0-9MmGg]*|[!1-9]*|*[0-9]|*[MmGg]*[MmGg]*) fail "ERGO_MAX_HEAP='${MAX_HEAP}' is not a JVM heap size such as 3G or 2048M" ;;
+        esac
+        HEAP_FLAG="-Xmx${MAX_HEAP}"
+    fi
 
     BLOCKS_TO_KEEP="${ERGO_BLOCKS_TO_KEEP:-1440}"
     case "$BLOCKS_TO_KEEP" in
@@ -571,7 +579,7 @@ main() {
     # the genesis id, the magic bytes and the P2P port (9030 / 9023). Those are the
     # chain's constants and not this service's business; what this service overrides is
     # in the file named by `-c`.
-    "$JAVA_BIN" "-Xmx${MAX_HEAP}" -jar "$ERGO_JAR" "--${NETWORK}" -c "$CONF_PATH" &
+    "$JAVA_BIN" "$HEAP_FLAG" -jar "$ERGO_JAR" "--${NETWORK}" -c "$CONF_PATH" &
     ERGO_PID=$!
 
     trap 'on_signal TERM' TERM

@@ -177,6 +177,16 @@ read_environment() {
         # config it stops on, and this service found that out by being stopped by it.
         FAST_BOOTSTRAP=false
     fi
+
+    # The NiPoPoW bootstrap also needs `ergo.chain.genesisId`, and only mainnet.conf
+    # sets it. On testnet, Ergo 6.0.7 stops at start with "nodeSettings.popowBootstrap
+    # is set but genesisId is not" (ErgoSettingsReader.consistentSettings). So testnet
+    # keeps the UTXO snapshot bootstrap and downloads every header. The testnet chain
+    # is small, thus this costs little.
+    NIPOPOW_BOOTSTRAP="$FAST_BOOTSTRAP"
+    if [ "$NETWORK" = testnet ]; then
+        NIPOPOW_BOOTSTRAP=false
+    fi
 }
 
 # ------------------------------------------------------------- peers from __config__
@@ -313,7 +323,7 @@ write_configuration() {
         printf '%s\n' '      p2pUtxoSnapshots = 2'
         printf '%s\n' '    }'
         printf '%s\n' '    nipopow {'
-        printf '      nipopowBootstrap = %s\n' "$FAST_BOOTSTRAP"
+        printf '      nipopowBootstrap = %s\n' "$NIPOPOW_BOOTSTRAP"
         printf '%s\n' '      p2pNipopows = 2'
         printf '%s\n' '    }'
         printf '%s\n' '  }'

@@ -147,6 +147,7 @@ BLOCKS_TO_KEEP=1440
 API_KEY_HASH='324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf'
 ERGO_API_KEY='hello'
 FAST_BOOTSTRAP=true
+NIPOPOW_BOOTSTRAP=true
 
 write_configuration '213.239.193.208:9030
 159.65.11.55:9030' >/dev/null
@@ -179,6 +180,7 @@ lacks "$empty_rendered" '213.239.193.208' 'and carries nothing over from the pre
 
 # The bootstrap settings follow the wallet, because Ergo will not have both.
 FAST_BOOTSTRAP=false
+NIPOPOW_BOOTSTRAP=false
 BLOCKS_TO_KEEP=-1
 write_configuration '' >/dev/null
 unpruned=$(cat "$CONF_PATH")
@@ -189,6 +191,7 @@ contains "$unpruned" 'utxoBootstrap = false' 'a wallet-bearing node writes utxoB
 contains "$unpruned" 'nipopowBootstrap = false' 'and nipopowBootstrap = false, which Ergo requires alongside it'
 contains "$unpruned" 'blocksToKeep = -1' 'and keeps every block, which is what unpruned means'
 FAST_BOOTSTRAP=true
+NIPOPOW_BOOTSTRAP=true
 BLOCKS_TO_KEEP=1440
 
 rm -rf "$DATA_DIR"
@@ -292,6 +295,15 @@ is "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSW
     unset ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD
     ERGO_API_KEY=k read_environment
     is "$FAST_BOOTSTRAP" 'true' 'with no wallet asked for, the fast bootstrap stays on'
+    is "$NIPOPOW_BOOTSTRAP" 'true' 'and on mainnet the NiPoPoW bootstrap is on too'
+)
+# testnet.conf sets no ergo.chain.genesisId, and Ergo refuses nipopowBootstrap
+# without one. The UTXO snapshot bootstrap does not need it and stays on.
+(
+    unset ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD
+    ERGO_API_KEY=k ERGO_NETWORK=testnet read_environment
+    is "$NIPOPOW_BOOTSTRAP" 'false' 'on testnet the NiPoPoW bootstrap is off'
+    is "$FAST_BOOTSTRAP" 'true' 'and the UTXO snapshot bootstrap stays on'
 )
 
 # A mnemonic must not appear in anything read_environment prints, ever. It is the one

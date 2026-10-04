@@ -45,6 +45,12 @@ CURL_RC="${DATA_DIR}/.curlrc"
 
 SERVICE_DIR="$(dirname "$(readlink -f "$0")")"
 
+# The JVM and the node, by full path. The guest does not get the ENV of the
+# Dockerfile: nodo exports only the filesystem, and its /init sets PATH to the
+# standard directories, which do not contain /opt/java/bin.
+JAVA_BIN=/opt/java/bin/java
+ERGO_JAR=/opt/ergo/ergo.jar
+
 # Where the node writes this instance's configuration. `__config__` at the root of the
 # filesystem is the packer's default (`config_declaration.path`, PACKING.md), and
 # `.service/service.json` does not override it.
@@ -565,7 +571,7 @@ main() {
     # the genesis id, the magic bytes and the P2P port (9030 / 9023). Those are the
     # chain's constants and not this service's business; what this service overrides is
     # in the file named by `-c`.
-    java "-Xmx${MAX_HEAP}" -jar /opt/ergo/ergo.jar "--${NETWORK}" -c "$CONF_PATH" &
+    "$JAVA_BIN" "-Xmx${MAX_HEAP}" -jar "$ERGO_JAR" "--${NETWORK}" -c "$CONF_PATH" &
     ERGO_PID=$!
 
     trap 'on_signal TERM' TERM

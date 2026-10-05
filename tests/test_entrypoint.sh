@@ -12,11 +12,11 @@
 # environment, which the script reads to stop short of starting a JVM. Testing a copy of
 # the logic would test the copy.
 #
-# The fixtures in `tests/fixtures/` are real serialized `celaut.ConfigurationFile`
-# messages, built with nodo's own `protos/celaut_pb2.py` -- see `tests/fixtures/README.md`
-# for the exact command. They are bytes, committed, so this test needs no Python and no
-# nodo checkout: `bash`, `protoc`, `awk`, and `b2sum` from coreutils, which is what the
-# image has.
+# The fixtures in `tests/fixtures/` are `.txtpb` sources. This script encodes each
+# one with `protoc --encode=celaut.ConfigurationFile` and the vendored
+# `service/celaut.proto` -- see `tests/fixtures/README.md`. The test needs no Python
+# and no nodo checkout: `bash`, `protoc`, `awk`, and `b2sum` from coreutils, which is
+# what the image has.
 #
 # Run with `bash tests/test_entrypoint.sh`. Nothing is started, nothing is fetched, and
 # no network is touched.
@@ -281,6 +281,8 @@ env_error() {   # runs read_environment with the given assignments, prints its m
 
 contains "$(env_error "ERGO_API_KEY=''")" 'ERGO_API_KEY is empty' \
          'a missing API key is refused with a reason'
+contains "$(env_error "ERGO_API_KEY='k\"k'")" 'quote, a backslash or a newline' \
+         'a quote in the API key is refused before it reaches .curlrc'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=signet")" 'is not one of mainnet, testnet' \
          'an unknown network is refused'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_NODE_NAME='x\"y'")" 'is not a safe P2P name' \
@@ -322,17 +324,20 @@ is "$(env_error "ERGO_API_KEY=k")" '' 'the minimal environment -- an API key -- 
 # checking the status code, because `curl` exits 0 on a 400 -- logged "wallet restored
 # from the mnemonic". Both halves of that are pinned, here and in the rendered config.
 contains "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p")" \
+         'needs an explicit ERGO_NETWORK' \
+         'a wallet without ERGO_NETWORK is refused rather than joined to mainnet'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=testnet; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p")" \
          'needs an unpruned node' \
          'a wallet on a pruned node is refused BEFORE the JVM starts, not as an HTTP 400 later'
 
-is "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p; ERGO_BLOCKS_TO_KEEP=-1")" \
+is "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=testnet; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p; ERGO_BLOCKS_TO_KEEP=-1")" \
    '' 'a wallet with ERGO_BLOCKS_TO_KEEP=-1 is accepted'
 
 # `blocksToKeep = -1` is only half of `isFullBlocksPruned`. `utxoBootstrap` is the other
 # half and is on by default here, so the same check has to turn it off -- otherwise the
 # configuration written is still a pruned one and the restore still fails.
 (
-    ERGO_API_KEY=k ERGO_BLOCKS_TO_KEEP=-1 \
+    ERGO_API_KEY=k ERGO_NETWORK=testnet ERGO_BLOCKS_TO_KEEP=-1 \
     ERGO_WALLET_MNEMONIC='a b c' ERGO_WALLET_PASSWORD=p read_environment
     is "$FAST_BOOTSTRAP" 'false' \
        'and it turns the fast bootstrap off, which is the other half of that rule'

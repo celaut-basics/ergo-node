@@ -94,7 +94,11 @@ read_environment() {
     NETWORK="${ERGO_NETWORK:-}"
     NETWORK="${NETWORK#"${NETWORK%%[![:space:]]*}"}"
     NETWORK="${NETWORK%"${NETWORK##*[![:space:]]}"}"
-    NETWORK="${NETWORK:-mainnet}"
+    NETWORK_FROM_DEFAULT=false
+    if [ -z "$NETWORK" ]; then
+        NETWORK=mainnet
+        NETWORK_FROM_DEFAULT=true
+    fi
     case "$NETWORK" in
         mainnet|testnet) : ;;
         *) fail "ERGO_NETWORK='${NETWORK}' is not one of mainnet, testnet" ;;
@@ -103,6 +107,13 @@ read_environment() {
     if [ -z "${ERGO_API_KEY:-}" ]; then
         fail "ERGO_API_KEY is empty. Ergo's REST API refuses every authenticated route without one, and this service has no other way to reach the wallet; a node with no key is a node nothing can use."
     fi
+    # .curlrc writes this between quotes. A quote, a backslash or a newline
+    # would change the curl config.
+    case "${ERGO_API_KEY}" in
+        *\"*|*$'\\'*|*$'\n'*|*$'\r'*)
+            fail "ERGO_API_KEY contains a quote, a backslash or a newline"
+            ;;
+    esac
 
     # BLAKE2b-256, hex, which is what `scorex.restApi.apiKeyHash` holds. `b2sum -l 256`
     # is coreutils', from the base image: OpenSSL 3.0 offers BLAKE2b at 512-bit output
@@ -165,6 +176,12 @@ read_environment() {
     MNEMONIC="${ERGO_WALLET_MNEMONIC:-}"
     if [ -n "$MNEMONIC" ] && [ -z "${ERGO_WALLET_PASSWORD:-}" ]; then
         fail "ERGO_WALLET_MNEMONIC is set but ERGO_WALLET_PASSWORD is not. The node encrypts its keystore with that password and asks for it on every unlock; it is required by /wallet/restore and cannot be defaulted to something guessable."
+    fi
+    # A wallet without ERGO_NETWORK would join mainnet. That is the default for a
+    # read-only node, and it is the wrong default for a key. The operator must
+    # name the chain.
+    if [ -n "$MNEMONIC" ] && [ "$NETWORK_FROM_DEFAULT" = true ]; then
+        fail "ERGO_WALLET_MNEMONIC needs an explicit ERGO_NETWORK. Set testnet or mainnet. Unset would join mainnet."
     fi
 
     # A wallet and a pruned node are mutually exclusive, and it is Ergo that says so,

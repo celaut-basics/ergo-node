@@ -91,8 +91,21 @@ SERVICE_DIR="$SERVICE"
 # ------------------------------------------------------------------- the peer list
 echo 'reading pow:ergo peers out of a __config__'
 
-CONFIG_FILE="${HERE}/fixtures/config-three-peers"
-peers=$(read_pow_peers)
+# The fixtures are text-format sources. Encode each one into the binary
+# `celaut.ConfigurationFile` that nodo writes, with the same vendored schema.
+FIXTURES=$(mktemp -d)
+trap 'rm -f "$RESULTS"; rm -rf "$FIXTURES"' EXIT
+for source in "${HERE}"/fixtures/*.txtpb; do
+    name=$(basename "$source" .txtpb)
+    if ! protoc --proto_path="$SERVICE" --encode=celaut.ConfigurationFile \
+                "${SERVICE}/celaut.proto" < "$source" > "${FIXTURES}/${name}"; then
+        printf 'cannot encode %s\n' "$source" >&2
+        exit 2
+    fi
+done
+
+CONFIG_FILE="${FIXTURES}/config-three-peers"
+peers=$(read_pow_peers 2>/dev/null)
 
 is "$peers" '213.239.193.208:9030
 159.65.11.55:9030
@@ -103,24 +116,40 @@ is "$peers" '213.239.193.208:9030
 # matched on the shape rather than on the enclosing tag would pick them up, and the node
 # would then try to speak Ergo's P2P protocol to the gateway it reports to.
 lacks "$peers" '93.184.216.34' 'a peer of another network is not read as one of ours'
-lacks "$peers" '10.0.0.1' 'the gateway instance is not read as a peer'
+lacks "$peers" '192.168.200.1' 'the gateway instance is not read as a peer'
+# The second peer also has a REST slot, as in a Gateway.ResolveNetwork answer.
+lacks "$peers" ':9053' 'the REST slot of a peer is not read as a P2P address'
 
-CONFIG_FILE="${HERE}/fixtures/config-no-peers"
+CONFIG_FILE="${FIXTURES}/config-rest-only"
+is "$(read_pow_peers 2>/dev/null)" '' 'a peer with only a REST slot yields nothing'
+
+CONFIG_FILE="${FIXTURES}/config-no-peers"
 is "$(read_pow_peers)" '' 'a pow:ergo resolution with no peers yields nothing'
 
-CONFIG_FILE="${HERE}/fixtures/config-other-network"
+CONFIG_FILE="${FIXTURES}/config-other-network"
 is "$(read_pow_peers)" '' 'a __config__ with no pow:ergo resolution at all yields nothing'
 
-CONFIG_FILE="${HERE}/fixtures/config-duplicate-peers"
+CONFIG_FILE="${FIXTURES}/config-nested-tag"
+is "$(read_pow_peers)" '' 'pow:ergo as a slot tag of another network does not select it'
+
+CONFIG_FILE="${FIXTURES}/config-duplicate-peers"
 is "$(read_pow_peers)" '213.239.193.208:9030
 159.65.11.55:9030' 'the same address twice is one peer'
 
-CONFIG_FILE="${HERE}/fixtures/config-similar-tag"
+CONFIG_FILE="${FIXTURES}/config-similar-tag"
 is "$(read_pow_peers)" '198.51.100.7:9030' 'the tag is matched whole: pow:ergo-testnet is a different domain'
 
-CONFIG_FILE="${HERE}/fixtures/config-multi-uri"
+CONFIG_FILE="${FIXTURES}/config-multi-uri"
 is "$(read_pow_peers)" '203.0.113.5:9030
 203.0.113.6:9030' 'every uri of a peer instance is read, not just the first'
+
+# An address goes into ergo.conf between quotes. Only an IP literal and a port
+# from 1 to 65535 get there.
+CONFIG_FILE="${FIXTURES}/config-bad-addresses"
+is "$(read_pow_peers 2>/dev/null)" '198.51.100.9:9030' \
+   'a hostname, a quote, port 0, -1 or 70000 is not a peer'
+contains "$(read_pow_peers 2>&1 >/dev/null)" 'skipped a pow:ergo address' \
+         'and each skipped address is said on stderr'
 
 # stdout only. The caller reads this function with `$(...)`, so anything it says about
 # itself has to be on stderr -- a log line on stdout would be parsed as an address and
@@ -130,9 +159,20 @@ is "$(read_pow_peers 2>/dev/null)" '' 'a missing __config__ is not fatal -- a de
 contains "$(read_pow_peers 2>&1 >/dev/null)" 'nothing resolved this instance' \
          'and it says so, on stderr, where it cannot become a peer'
 
-CONFIG_FILE="${HERE}/fixtures/config-three-peers"
-is "$(read_pow_peers 2>&1 | grep -c '^\[ergo-node\]' || true)" '0' \
+CONFIG_FILE="${FIXTURES}/config-bad-addresses"
+is "$(read_pow_peers 2>&1 | grep -c '^\[ergo-node\]' || true)" '5' \
    'nothing this function logs can end up in the peer list'
+is "$(read_pow_peers 2>/dev/null | grep -c '^\[ergo-node\]' || true)" '0' \
+   'and stdout carries addresses only'
+
+# A file that is not a ConfigurationFile is a loud failure, not "no peers".
+printf '\377\377\377\377' > "${FIXTURES}/garbage"
+CONFIG_FILE="${FIXTURES}/garbage"
+# The sourced entrypoint turns on `set -e`, so the status is taken with `||`.
+garbage_status=0
+garbage_out=$( (ERGO_PID=''; read_pow_peers) 2>&1 ) || garbage_status=$?
+is "$garbage_status" '1' 'a __config__ that does not decode stops the start'
+contains "$garbage_out" 'is not a celaut.ConfigurationFile' 'and says why'
 
 # ------------------------------------------------------------- the rendered config
 echo

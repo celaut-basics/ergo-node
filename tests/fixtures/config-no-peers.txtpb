@@ -1,0 +1,18 @@
+# A pow:ergo resolution with no peer. This is not an error.
+#
+# Text format of a celaut.ConfigurationFile. tests/test_entrypoint.sh encodes it
+# with protoc and service/celaut.proto at each run.
+
+gateway {
+  api {
+    slot {
+      port: 8080
+      transport { tags: "tcp" }
+    }
+  }
+  uri_slot {
+    internal_port: 8080
+    uri { ip: "192.168.200.1" port: 8080 }
+  }
+}
+network_resolution { tags: "pow:ergo" }

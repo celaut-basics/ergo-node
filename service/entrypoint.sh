@@ -67,6 +67,10 @@ REST_PORT=9053
 # order, and this service may one day declare more than one.
 POW_TAG='pow:ergo'
 
+# The tag that nodo puts on the REST slot of a resolved peer
+# (`pow_networks.REST_SLOT_TAG`). The REST API is not a P2P peer.
+REST_SLOT_TAG='ergo-rest'
+
 ERGO_PID=''
 STOPPING=''
 # The jar's own exit status, once something has collected it. A node that stopped
@@ -207,11 +211,23 @@ read_environment() {
 #   across protobuf versions, which is what makes `awk` an honest tool for it rather
 #   than a clever one.
 #
-# The `awk` program tracks brace depth so that only a top-level `network_resolution`
-# block is considered -- `gateway` carries `uri` blocks too, and they are not peers --
-# and within one such block it emits an address only for a `uri` that had both an `ip`
-# and a `port`. Proto3 omits fields at their default, so a `uri` with no `port` line is
-# one whose port is 0, which is not an address to dial.
+# The `awk` program tracks the path of blocks it is in, as protoc prints them: one
+# opening or closing brace per line, always the last token. It reads only a top-level
+# `network_resolution` whose own `tags` (depth 1) contain `pow:ergo` exactly. The
+# `gateway` and other resolutions also carry `uri` blocks, and they are not peers.
+#
+# Inside it, one `peer_instances` is one peer. nodo gives each peer a P2P slot, tagged
+# `ergo-p2p` in `Api.Slot.protocol_stack`, and can also give a REST slot, tagged
+# `ergo-rest` (src/manager/pow_networks.py). The REST API is not a P2P peer, so a
+# `uri_slot` whose `internal_port` is the port of an `ergo-rest` slot is skipped. For
+# a guest that declares only `ergo-p2p`, nodo removes the REST slot before it writes
+# `__config__`. The skip here is a second guard, and it keeps the older one-slot shape
+# readable.
+#
+# Each address must be an IPv4 or IPv6 literal and a port from 1 to 65535. Anything
+# else is not dialled and not written into `ergo.conf`, where a quote in it would
+# change the HOCON. Proto3 omits a field at its default, so a `uri` with no `port`
+# line has port 0.
 #
 # Everything this function says goes to stderr, because its STDOUT IS THE PEER LIST: the
 # caller reads it with `$(...)`, and a log line on the same stream would be parsed as an
@@ -236,20 +252,51 @@ read_pow_peers() {
     fi
 
     printf '%s\n' "$decoded" \
-        | awk -v want="$POW_TAG" '
-            # Depth of the block we are inside, counting braces as protoc prints them:
-            # one opening or closing brace per line, always the last token.
+        | awk -v want="$POW_TAG" -v rest_tag="$REST_SLOT_TAG" '
+            function value(line) {
+                sub(/^[^"]*"/, "", line); sub(/"[[:space:]]*$/, "", line)
+                return line
+            }
+            function new_peer() {
+                split("", rest_ports); n = 0
+            }
+            function valid(ip, port) {
+                if (port !~ /^[0-9]+$/ || port < 1 || port > 65535) return 0
+                if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 1
+                return (ip ~ /^[0-9A-Fa-f:.]+$/ && index(ip, ":") > 0)
+            }
             /\{[[:space:]]*$/ {
                 depth++
-                if (depth == 1) {
-                    inres = ($1 == "network_resolution" || $1 == "network_resolution:")
-                    matched = 0
-                }
-                if (inres && $1 == "uri") { ip = ""; port = "" }
+                block[depth] = $1
+                if (depth == 1) { inres = ($1 == "network_resolution"); matched = 0 }
+                if (!inres) next
+                if (depth == 2 && $1 == "peer_instances") new_peer()
+                if (depth == 4 && block[3] == "api" && $1 == "slot") { slot_port = 0; slot_rest = 0 }
+                if (depth == 3 && $1 == "uri_slot") internal = 0
+                if (depth == 4 && block[3] == "uri_slot" && $1 == "uri") { ip = ""; port = 0 }
                 next
             }
             /^[[:space:]]*\}[[:space:]]*$/ {
-                if (inres && depth == 1) { inres = 0; matched = 0 }
+                if (inres && depth == 4 && block[3] == "api" && block[4] == "slot" && slot_rest)
+                    rest_ports[slot_port] = 1
+                if (inres && depth == 4 && block[3] == "uri_slot" && block[4] == "uri") {
+                    n++; uri_ip[n] = ip; uri_port[n] = port; uri_internal[n] = internal
+                }
+                if (inres && depth == 2 && block[2] == "peer_instances" && matched) {
+                    for (i = 1; i <= n; i++) {
+                        if (uri_internal[i] in rest_ports) continue
+                        if (!valid(uri_ip[i], uri_port[i])) {
+                            printf "[ergo-node] skipped a pow:ergo address that is not an IP literal and a port\n" > "/dev/stderr"
+                            continue
+                        }
+                        a = uri_ip[i]
+                        # Ergo writes an IPv6 literal in brackets, as its own
+                        # mainnet.conf does, so knownPeers can split the port off.
+                        if (index(a, ":") > 0) a = "[" a "]"
+                        print a ":" uri_port[i]
+                    }
+                }
+                if (depth == 1) inres = 0
                 depth--
                 next
             }
@@ -257,30 +304,15 @@ read_pow_peers() {
             # tags is field 1 of NetworkResolution and peer_instances is field 2, so a
             # tag is always printed before the peers it qualifies. The match is on the
             # whole tag, never a prefix: `pow:ergo-testnet` is a different domain.
-            $1 == "tags:" {
-                v = $0
-                sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v)
-                if (v == want) matched = 1
+            depth == 1 && $1 == "tags:" { if (value($0) == want) matched = 1; next }
+            depth == 4 && block[4] == "slot" && $1 == "port:" { slot_port = $2; next }
+            depth == 5 && block[4] == "slot" && block[5] == "protocol_stack" && $1 == "tags:" {
+                if (value($0) == rest_tag) slot_rest = 1
                 next
             }
-            $1 == "ip:" {
-                v = $0
-                sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v)
-                ip = v
-                next
-            }
-            $1 == "port:" {
-                port = $2
-                if (matched && ip != "" && port != "" && port != "0") {
-                    # Ergo writes an IPv6 literal bracketed, as its own mainnet.conf
-                    # does. A resolver that produced a bare v6 address would otherwise
-                    # give `scorex.network.knownPeers` a string it cannot split.
-                    if (index(ip, ":") > 0 && substr(ip, 1, 1) != "[") ip = "[" ip "]"
-                    print ip ":" port
-                }
-                ip = ""; port = ""
-                next
-            }
+            depth == 3 && block[3] == "uri_slot" && $1 == "internal_port:" { internal = $2; next }
+            depth == 4 && block[4] == "uri" && $1 == "ip:" { ip = value($0); next }
+            depth == 4 && block[4] == "uri" && $1 == "port:" { port = $2; next }
         ' \
         | awk '!seen[$0]++'
 }

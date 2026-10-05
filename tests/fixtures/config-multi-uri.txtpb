@@ -1,0 +1,29 @@
+# One peer at two addresses, in the older shape: slot port 1 and the protocol
+# stack of the request.
+#
+# Text format of a celaut.ConfigurationFile. tests/test_entrypoint.sh encodes it
+# with protoc and service/celaut.proto at each run.
+
+gateway {
+  api {
+    slot {
+      port: 8080
+      transport { tags: "tcp" }
+    }
+  }
+  uri_slot {
+    internal_port: 8080
+    uri { ip: "192.168.200.1" port: 8080 }
+  }
+}
+network_resolution {
+  tags: "pow:ergo"
+  peer_instances {
+    api { slot { port: 1 transport { tags: "tcp" } protocol_stack { tags: "ergo-p2p" } } }
+    uri_slot {
+      internal_port: 1
+      uri { ip: "203.0.113.5" port: 9030 }
+      uri { ip: "203.0.113.6" port: 9030 }
+    }
+  }
+}

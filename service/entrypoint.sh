@@ -117,6 +117,26 @@ read_environment() {
 
     NODE_NAME="${ERGO_NODE_NAME:-}"
     NODE_NAME="${NODE_NAME:-celaut-ergo-node}"
+    # ergo.conf writes this between quotes. A quote or a newline would change
+    # the HOCON, so only a short P2P name is accepted.
+    case "$NODE_NAME" in
+        *[!A-Za-z0-9._:-]*)
+            fail "ERGO_NODE_NAME is not a safe P2P name. Use letters, digits, dot, underscore, colon or hyphen."
+            ;;
+    esac
+
+    DATA_DIR="${ERGO_DATADIR:-/data}"
+    case "$DATA_DIR" in
+        /*) : ;;
+        *) fail "ERGO_DATADIR must be an absolute path" ;;
+    esac
+    case "$DATA_DIR" in
+        *[!A-Za-z0-9/._-]*)
+            fail "ERGO_DATADIR contains a character that is not safe in ergo.conf"
+            ;;
+    esac
+    CONF_PATH="${DATA_DIR}/ergo.conf"
+    CURL_RC="${DATA_DIR}/.curlrc"
 
     # The JVM heap. Empty means a share of the RAM of the guest, which is the
     # `at_init.mem_limit` of service.json. nodo boots the microVM with that RAM and does

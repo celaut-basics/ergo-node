@@ -272,7 +272,7 @@ echo 'the environment contract'
 env_error() {   # runs read_environment with the given assignments, prints its message
     (
         unset ERGO_API_KEY ERGO_NETWORK ERGO_MAX_HEAP ERGO_BLOCKS_TO_KEEP \
-              ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD
+              ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD ERGO_NODE_NAME ERGO_DATADIR
         eval "$1"
         ERGO_PID=''
         read_environment 2>&1
@@ -283,6 +283,12 @@ contains "$(env_error "ERGO_API_KEY=''")" 'ERGO_API_KEY is empty' \
          'a missing API key is refused with a reason'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=signet")" 'is not one of mainnet, testnet' \
          'an unknown network is refused'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_NODE_NAME='x\"y'")" 'is not a safe P2P name' \
+         'a quote in the node name is refused before it reaches ergo.conf'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_DATADIR=data")" 'must be an absolute path' \
+         'a relative data dir is refused'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_DATADIR='/tmp/x\"y'")" 'is not safe in ergo.conf' \
+         'a quote in the data dir is refused'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_MAX_HEAP=lots")" 'is not a JVM heap size' \
          'a malformed heap size is refused before the JVM sees it'
 for bad in 3 3GB 1G2G G 0G '3 G'; do

@@ -166,12 +166,12 @@ rule the node writes is for those peers and nothing else.
 | variable | | what it is |
 |---|---|---|
 | `ERGO_API_KEY` | **required** | What callers authenticate to `:9053` with. Stored in `ergo.conf` as its BLAKE2b-256 hash, never in plaintext. |
-| `ERGO_NETWORK` | `mainnet` | `mainnet` or `testnet`. |
+| `ERGO_NETWORK` | `mainnet` | `mainnet` or `testnet`. Prefer testnet. A wallet requires this variable. Unset with a mnemonic is refused, so a key does not join mainnet by default. |
 | `ERGO_DATADIR` | `/data` | Where the node keeps its stores. Must be an absolute path. |
 | `ERGO_NODE_NAME` | `celaut-ergo-node` | The name sent in the P2P handshake. Letters, digits, `.` `_` `:` `-` only. |
 | `ERGO_MAX_HEAP` | (empty) | The JVM's `-Xmx`, for example `3G` or `2048M`. Empty means 60 % of the guest RAM (`-XX:MaxRAMPercentage=60.0`). nodo boots the microVM with `resources.at_init.mem_limit` and does not add more unless the service asks. |
 | `ERGO_BLOCKS_TO_KEEP` | `1440` | Full blocks to retain — roughly a day. `-1` keeps all of them, turns the fast bootstrap off, and needs the disk raised accordingly. |
-| `ERGO_WALLET_MNEMONIC` | — | Optional, and **requires `ERGO_BLOCKS_TO_KEEP=-1`** — see below. Restored through the node's own `/wallet/restore`. |
+| `ERGO_WALLET_MNEMONIC` | — | Optional. Requires `ERGO_NETWORK` and `ERGO_BLOCKS_TO_KEEP=-1`. Restored through the node's own `/wallet/restore`. |
 | `ERGO_WALLET_PASSWORD` | — | Required *if* a mnemonic is set: the keystore's encryption password. |
 | `ERGO_WALLET_MNEMONIC_PASSPHRASE` | — | Optional BIP-39 passphrase. Unset and empty are **different wallets**. |
 
@@ -231,7 +231,8 @@ if (settings.nodeSettings.isFullBlocksPruned)
 So the UTXO-snapshot bootstrap that makes this service fit in 8 GB is exactly what makes
 `/wallet/restore` return HTTP 400. Setting `ERGO_WALLET_MNEMONIC` therefore **requires**
 `ERGO_BLOCKS_TO_KEEP=-1`, which also turns the fast bootstrap off and means a full sync
-from genesis on a disk much larger than the declared 8 GB.
+from genesis on a disk much larger than the declared 8 GB. Raise `resources.*.disk_space`
+and pack again. Cloud Hypervisor cannot grow the disk of a running instance.
 
 The entrypoint refuses that combination at startup, with the rule quoted, rather than
 letting the JVM start and the restore fail forty seconds later. A node that only *reads*
@@ -290,8 +291,10 @@ already up.
 
 - they are in the node's `config.yaml`, and with a wallet configured that file is **the
   only backup of it** — this service stores no keys, it hands them to Ergo;
-- the node records how each instance was launched and **redacts** these values, keeping
-  the variable's name and not its contents;
+- the node records how each instance was launched. It redacts a name that contains
+  `MNEMONIC`, `PASSWORD`, `PASSPHRASE`, `SECRET` or `PRIVATE_KEY`
+  (`src/gateway/launcher/local_execution/local_execution.py`). `ERGO_API_KEY` does not
+  match that list. Treat the launch record as holding the API key;
 - nothing here logs them. Not the mnemonic, not the API key, not the spending password.
   The API key reaches `curl` through a mode-0600 config file and the wallet request
   bodies through mode-0600 files built by `jq` from the environment — never through
@@ -320,18 +323,23 @@ nodo kill <instance>
 `nodo pack` accepts a directory or an `https://` git URL. It does not accept `--fast`
 or `--arch`. The architecture comes from `.service/service.json`.
 
-Then point the node at that id:
+Nodo has no `core_services.ergo-node` role. Point the node at the REST API of this
+instance:
 
 ```yaml
-core_services:
-  ergo-node: "<the id nodo pack printed>"
+ledgers:
+  ergo:
+    NODE_URL: "http://127.0.0.1:<host-port-from-nodo-tunnel>"
 ```
 
 The image is `linux/arm64`. The Ergo jar is JVM bytecode and is architecture-independent
 — what `architecture` in `.service/service.json` describes is the base image and the JRE
-tarball, so another architecture needs those two changed and nothing else. A typical
-x86_64 nodo does not pack this tree unless QEMU TCG is on (`virtualizers.qemu.ENABLE`,
-default false).
+tarball, so another architecture needs those two changed and nothing else.
+
+Pack uses BuildKit `--opt platform=` and `ensure_native_arch`. A foreign-arch pack needs
+binfmt, not QEMU. `virtualizers.qemu.ENABLE` is for **execute** of a foreign-arch guest.
+The example config sets it true. The code fallback is false. A typical x86_64 nodo that
+runs this arm64 image uses TCG. That path is likely too slow for an Ergo node.
 
 The packer build context is `.service/`. Project files land in `.service/service/`.
 `COPY ./service` is rewritten to `service/service`. A bare `COPY service` is not

@@ -104,8 +104,10 @@ So they are templates, and the instantiator fills them in:
 | `ERGO_MIN_CUMULATIVE_DIFFICULTY` | The cumulative work (`/info` → `fullBlocksScore`) the chain had reached **at that block** — not at the current tip. Using the tip's figure makes the ask silently stricter every time the value is written, and a requirement whose meaning depends on when it was authored is one nobody can read. Written as a decimal string: Ergo's score passed 2⁶⁴ long ago. |
 | `ERGO_MIN_HEIGHT` | That block's height. It restates the same fact in a form the resolver can check from `/info` alone, before spending two more requests on the block itself. |
 
-A worked example for mainnet, which is what this file used to hardcode — the values are
-*examples*, not defaults, and there is nothing in the service that supplies them:
+Prefer **testnet** until you mean to join mainnet. Do not pass a mainnet mnemonic to a
+test instance. A worked example for mainnet, which is what this file used to hardcode —
+the values are *examples*, not defaults, and there is nothing in the service that
+supplies them:
 
 ```sh
 # A real block at a round height:
@@ -144,7 +146,7 @@ per network and driven by whether its templates are answered:
 
 | | |
 |---|---|
-| all three set | The node substitutes them, resolves `pow:ergo` at launch — verifying each candidate against exactly those conditions (`src/manager/pow_networks.py`) — and writes the survivors into this instance's `__config__`. `service/entrypoint.sh` reads every `peer_instances[].uri_slot[].uri` out of it into `scorex.network.knownPeers`. |
+| all three set | The node substitutes them, resolves `pow:ergo` at launch — verifying each candidate against exactly those conditions (`src/manager/pow_networks.py`) — and writes the survivors into this instance's `__config__`. For a guest that declares `ergo-p2p` and not `ergo-rest`, nodo keeps only the P2P slot (`pow_networks.narrow_instances_for_local_grant`). `service/entrypoint.sh` reads those P2P `uri` values into `scorex.network.knownPeers`. It skips a uri_slot whose port is an `ergo-rest` slot. |
 | any of them unset | The node **defers** this network: it resolves nothing, omits the entry from `__config__`, logs which variables were missing, and **does not fail the launch**. The entrypoint's existing empty-resolution path takes over — `knownPeers = []`, said out loud in the log, node up on its REST API. It can be resolved later over `Gateway.ResolveNetwork`. |
 
 A deferred network is not an error and not a fallback to a hardcoded list. **No address
@@ -165,9 +167,9 @@ rule the node writes is for those peers and nothing else.
 |---|---|---|
 | `ERGO_API_KEY` | **required** | What callers authenticate to `:9053` with. Stored in `ergo.conf` as its BLAKE2b-256 hash, never in plaintext. |
 | `ERGO_NETWORK` | `mainnet` | `mainnet` or `testnet`. |
-| `ERGO_DATADIR` | `/data` | Where the node keeps its stores. |
-| `ERGO_NODE_NAME` | `celaut-ergo-node` | The name sent in the P2P handshake. |
-| `ERGO_MAX_HEAP` | `3G` | The JVM's `-Xmx`. Keep it under the instance's memory limit. |
+| `ERGO_DATADIR` | `/data` | Where the node keeps its stores. Must be an absolute path. |
+| `ERGO_NODE_NAME` | `celaut-ergo-node` | The name sent in the P2P handshake. Letters, digits, `.` `_` `:` `-` only. |
+| `ERGO_MAX_HEAP` | (empty) | The JVM's `-Xmx`, for example `3G` or `2048M`. Empty means 60 % of the guest RAM (`-XX:MaxRAMPercentage=60.0`). nodo boots the microVM with `resources.at_init.mem_limit` and does not add more unless the service asks. |
 | `ERGO_BLOCKS_TO_KEEP` | `1440` | Full blocks to retain — roughly a day. `-1` keeps all of them, turns the fast bootstrap off, and needs the disk raised accordingly. |
 | `ERGO_WALLET_MNEMONIC` | — | Optional, and **requires `ERGO_BLOCKS_TO_KEEP=-1`** — see below. Restored through the node's own `/wallet/restore`. |
 | `ERGO_WALLET_PASSWORD` | — | Required *if* a mnemonic is set: the keystore's encryption password. |
@@ -184,12 +186,11 @@ to talk to and does not have to know which chain it asked for.
 | `ERGO_MIN_CUMULATIVE_DIFFICULTY` | see below | The chain's cumulative work at that block, as a decimal string. |
 | `ERGO_MIN_HEIGHT` | see below | That block's height. |
 
-These are **not read by `service/entrypoint.sh`** and nothing inside the container ever
-sees them used. They are declared in `envs` so a launcher knows to supply them, and they
-are consumed by the **nodo that launches this instance**: it substitutes them into the
-`pow:ergo` network's `formal` before resolving it
-([nodo#385](https://github.com/celaut-project/nodo/issues/385)). The entrypoint's job is
-unchanged — it reads whatever peers ended up in `__config__`.
+These are **not read by `service/entrypoint.sh`**. The packer does not record `envs`
+(`src/packers/zip_with_dockerfile.py`). Pass them with `nodo execute -e`. The nodo that
+launches this instance substitutes them into the `pow:ergo` network `formal` before it
+resolves the network. The entrypoint reads only the peers that ended up in `/__config__`.
+The node always writes that file at `/__config__`. It ignores `config_declaration.path`.
 
 They are therefore **not required, and have no defaults**. Leave any of them unset and
 the network is *deferred*: the node resolves nothing for it, the launch succeeds, and
@@ -242,7 +243,9 @@ Ergo also refuses to *start* with `nipopowBootstrap` on unless the node is prune
 of those two senses. That is why `utxoBootstrap` and `nipopowBootstrap` are one flag in
 the entrypoint and not two — "bootstrap fast" and "keep everything" are the two
 configurations Ergo actually has, and a mix of them is one it stops on. Both of these
-were found by running the image, not by reading the docs.)
+were found by running the image, not by reading the docs. On testnet, NiPoPoW is off
+even without a wallet: `testnet.conf` does not set `ergo.chain.genesisId`, and Ergo
+refuses `nipopowBootstrap` without it. The UTXO snapshot bootstrap stays on.)
 
 And the related limitation, for the unpruned case: **a snapshot-bootstrapped node cannot
 rescan history it never downloaded.** With `utxoBootstrap = true` the node's state begins
@@ -270,10 +273,10 @@ snapshot download need on top of it. For scale: the same measurement puts the ch
 own growth at **~8 GB/year** (30398 B × 720 blocks/day × 365), which is what
 `ERGO_BLOCKS_TO_KEEP=-1` would be signing up for and why it is not the default.
 
-**Memory: 2 GB at init, 4 GB at most**, with `ERGO_MAX_HEAP=3G` inside it. Ergo's own
-install documentation runs mainnet at `-Xmx4G` and notes that bootstrapping is the
-memory-hungry phase; 3 GB of heap under a 4 GB instance limit leaves room for the JVM's
-non-heap use and for RocksDB's off-heap caches, which are not in `-Xmx`.
+**Memory: 4 GB at init and at most, two vCPUs.** nodo boots the guest with
+`at_init.mem_limit`. This service never calls ModifyServiceSystemResources, so a 2 GB
+start with a 3 GB heap lets the guest kernel kill the JVM. The default heap is 60 % of
+that RAM. The rest is for RocksDB, the JIT and the threads.
 
 **A Celaut instance has no persistent volume for its own data.** Stop the instance and
 the stores go with it, so the next start bootstraps from a snapshot again — minutes
@@ -297,9 +300,25 @@ already up.
 
 ## Building it
 
+There is no `nodo run` or `nodo stop`. Pack, start, open a tunnel, then kill.
+
 ```sh
-nodo pack .        # produces the service and prints its id (content hash)
+nodo pack .
+# prints: Service ID -> <hex>
+
+# Testnet only until you mean to join mainnet. Do not pass a mainnet mnemonic.
+nodo execute -e ERGO_API_KEY 'test-key' -e ERGO_NETWORK testnet \
+  -e ERGO_BLOCK_ID '<testnet-block-id>' \
+  -e ERGO_MIN_CUMULATIVE_DIFFICULTY '<score-at-that-block>' \
+  -e ERGO_MIN_HEIGHT '<height>' \
+  <id-or-tag>
+
+nodo tunnel <instance> 9053
+nodo kill <instance>
 ```
+
+`nodo pack` accepts a directory or an `https://` git URL. It does not accept `--fast`
+or `--arch`. The architecture comes from `.service/service.json`.
 
 Then point the node at that id:
 
@@ -310,7 +329,14 @@ core_services:
 
 The image is `linux/arm64`. The Ergo jar is JVM bytecode and is architecture-independent
 — what `architecture` in `.service/service.json` describes is the base image and the JRE
-tarball, so another architecture needs those two changed and nothing else.
+tarball, so another architecture needs those two changed and nothing else. A typical
+x86_64 nodo does not pack this tree unless QEMU TCG is on (`virtualizers.qemu.ENABLE`,
+default false).
+
+The packer build context is `.service/`. Project files land in `.service/service/`.
+`COPY ./service` is rewritten to `service/service`. A bare `COPY service` is not
+rewritten and the build fails. The guest does not get Dockerfile `ENV` or `PATH`.
+The entrypoint calls `/opt/java/bin/java` by its full path.
 
 Everything is pinned: the base image (`debian:bookworm-slim`) by digest, the Temurin 17
 JRE by the SHA-256 Adoptium publishes, the Ergo 6.0.5 jar by a SHA-256 computed from the
@@ -337,15 +363,16 @@ the tests worth running on a workstation as well as in the image. On macOS:
 
 They cover the two things that fail *quietly* in production:
 
-**Reading `__config__`.** Six committed fixtures, real serialized
-`celaut.ConfigurationFile` messages built with nodo's own `celaut_pb2.py`
-(`tests/fixtures/make_fixtures.py` rebuilds them, and is not run by the test — the bytes
-are committed so the test needs no Python). They check that a `pow:ergo` resolution's
-peers are read in order; that another network's peers and **the gateway instance** are
-not, both of which contain `uri { ip, port }` blocks of exactly the same shape; that
-`pow:ergo-testnet` is not matched as a prefix; that duplicates collapse; that every `uri`
-of a multi-address instance is read; and that a missing `__config__` starts the node
-rather than stopping it.
+**Reading `__config__`.** Nine `.txtpb` fixtures. The test encodes each file with
+`protoc --encode=celaut.ConfigurationFile` and the vendored `service/celaut.proto`.
+That is the same schema the entrypoint uses to decode `/__config__`. The test needs no
+Python and no nodo checkout. They check that a `pow:ergo` resolution's P2P peers are
+read in order; that a REST slot is not a peer; that `pow:ergo` as a slot tag of another
+network does not select it; that another network's peers and **the gateway instance**
+are not peers; that `pow:ergo-testnet` is not matched as a prefix; that duplicates
+collapse; that every `uri` of a multi-address instance is read; that a hostname, a quote
+or a bad port is skipped; that a missing `__config__` starts the node; and that a file
+that does not decode stops the start.
 
 **The rendered config.** That an empty resolution writes `knownPeers = []` and not a
 missing key — Ergo's `mainnet.conf` is a *fallback* under the user's config, so an absent
@@ -389,39 +416,31 @@ came from. In order:
 - **Nothing leaks.** `docker logs | grep -c` for the mnemonic, the API key and the
   spending password: **0** on every run.
 
-What is still **not verified**: a full mainnet sync (the runs above reached height 0 —
-they confirm the node starts, configures, peers and serves, not that it completes a UTXO
-bootstrap), and `nodo pack .`, which needs a nodo with #383 and was not run.
+What is still **not verified**: a full chain sync (the Docker runs above reached height 0),
+and **`nodo pack` / `nodo execute` on a real nodo**. This audit host has no KVM. Nothing
+in this tree was packed or launched on a node.
 
 ## What this depends on
 
-Two things in nodo, one merged-pending and one in flight. Neither is a limitation of this
-service; both are named so the failure mode is recognizable.
+These nodo changes are on `celaut-project/nodo` branch `dev`. A node older than that
+will fail in the ways below.
 
 - **[nodo#383](https://github.com/celaut-project/nodo/pull/383)** — the packer carries
   `network[].formal` and `network[].protocol_stack` from `service.json`. Before it,
   `parseNetwork` read `tags` and `prose` and dropped the rest, so the `formal` block
   above would pack to nothing and this service would ask for "any `pow:ergo` peer"
-  instead of the one it declares. **`nodo pack .` against a tree without that PR produces
-  a spec with an empty `formal`.**
+  instead of the one it declares.
 - **[nodo#384](https://github.com/celaut-project/nodo/pull/384)** — the `pow:ergo`
   resolver emits each peer's P2P endpoint. A peer is *verified* over its REST API
   (`:9053`) and has to be *dialled* over Ergo's P2P port (`:9030` on mainnet, `:9023` on
-  testnet), and before that PR `resolve_pow_network` built each `Instance.Uri` from the
-  URL it verified. Without it, the addresses reaching `knownPeers` carry the REST port,
-  and the node will not complete a handshake with them.
-  The entrypoint writes whatever it is given — the port comes from the resolution, and
-  translating it here would be this service second-guessing the resolver.
+  testnet). The entrypoint writes the P2P addresses it is given. It does not translate
+  ports. It skips an `ergo-rest` slot.
 - **[nodo#386](https://github.com/celaut-project/nodo/pull/386)** (implements
   [nodo#385](https://github.com/celaut-project/nodo/issues/385)) — `${VAR}` templates in
   `network[].formal`, substituted at launch from the launcher's environment, with a
-  network whose variables are unanswered *deferred* rather than resolved. **This is a
-  hard dependency of the `service.json` in this repository as it now stands.** Against a
+  network whose variables are unanswered *deferred* rather than resolved. Against a
   nodo without it, `parse_pow_formal` refuses `pow.block_id=${ERGO_BLOCK_ID}` as
-  non-hexadecimal and **`nodo pack .` fails outright** — the templated spec does not
-  pack at all, rather than packing and misbehaving. A node that has the packer half but
-  not the launch half would pack it and then fail to resolve it, which is why the two
-  landed together.
+  non-hexadecimal and **`nodo pack .` fails outright**.
 
 ## What is not here
 

@@ -25,7 +25,7 @@ hardcoding a list: Ergo's own `mainnet.conf` ships thirteen addresses, and every
 image built on it inherits them. That works, and it means the node's first act is to
 trust a list somebody wrote down in 2021.
 
-This service declares a network instead. `.service/service.json`:
+This service declares a network instead. `amd64/.service/service.json` (`arm64/` declares the same):
 
 ```json
 {
@@ -306,7 +306,7 @@ already up.
 There is no `nodo run` or `nodo stop`. Pack, start, open a tunnel, then kill.
 
 ```sh
-nodo pack .
+nodo pack amd64        # or: nodo pack arm64
 # prints: Service ID -> <hex>
 
 # Testnet only until you mean to join mainnet. Do not pass a mainnet mnemonic.
@@ -321,7 +321,7 @@ nodo kill <instance>
 ```
 
 `nodo pack` accepts a directory or an `https://` git URL. It does not accept `--fast`
-or `--arch`. The architecture comes from `.service/service.json`.
+or `--arch`. The architecture comes from `<dir>/.service/service.json`.
 
 Nodo has no `core_services.ergo-node` role. Point the node at the REST API of this
 instance:
@@ -332,14 +332,33 @@ ledgers:
     NODE_URL: "http://127.0.0.1:<host-port-from-nodo-tunnel>"
 ```
 
-The image is `linux/arm64`. The Ergo jar is JVM bytecode and is architecture-independent
-— what `architecture` in `.service/service.json` describes is the base image and the JRE
-tarball, so another architecture needs those two changed and nothing else.
+### Packing: one tree per architecture
+
+A Celaut service has one architecture. Thus the repo has one pack root for each
+architecture, as `celaut-basics/demo-service` does:
+
+```
+amd64/                      nodo pack amd64
+├── .service/               Dockerfile, service.json, pack_config.json (linux/amd64)
+└── service -> ../service   symlink to the shared source
+arm64/                      nodo pack arm64
+├── .service/               the same files for linux/arm64
+└── service -> ../service
+service/                    entrypoint.sh, celaut.proto, buffer.proto
+```
+
+`nodo pack` copies the pack root and follows the symlink. A plain `docker build` does
+not follow it: for a local build, copy the root first (`cp -RL amd64 /tmp/ergo-amd64`).
+The Ergo jar is JVM bytecode and is the same for both. The two Dockerfiles differ only
+in the Temurin JRE tarball (`x64` or `aarch64`) and its checksum. The base image pin is
+a multi-arch index, and every Debian pin exists at the same version on both
+architectures. `tests/test_layout.py` checks the layout.
 
 Pack uses BuildKit `--opt platform=` and `ensure_native_arch`. A foreign-arch pack needs
 binfmt, not QEMU. `virtualizers.qemu.ENABLE` is for **execute** of a foreign-arch guest.
-The example config sets it true. The code fallback is false. A typical x86_64 nodo that
-runs this arm64 image uses TCG. That path is likely too slow for an Ergo node.
+The example config sets it true. The code fallback is false. An x86_64 nodo that
+runs the arm64 image uses TCG. That path is likely too slow for an Ergo node: on x86_64,
+pack `amd64`.
 
 The packer build context is `.service/`. Project files land in `.service/service/`.
 `COPY ./service` is rewritten to `service/service`. A bare `COPY service` is not
@@ -448,7 +467,7 @@ will fail in the ways below.
   `network[].formal`, substituted at launch from the launcher's environment, with a
   network whose variables are unanswered *deferred* rather than resolved. Against a
   nodo without it, `parse_pow_formal` refuses `pow.block_id=${ERGO_BLOCK_ID}` as
-  non-hexadecimal and **`nodo pack .` fails outright**.
+  non-hexadecimal and **`nodo pack` fails outright**.
 
 ## What is not here
 

@@ -45,6 +45,12 @@ CURL_RC="${DATA_DIR}/.curlrc"
 
 SERVICE_DIR="$(dirname "$(readlink -f "$0")")"
 
+# The JVM and the node, by full path. The guest does not get the ENV of the
+# Dockerfile: nodo exports only the filesystem, and its /init sets PATH to the
+# standard directories, which do not contain /opt/java/bin.
+JAVA_BIN=/opt/java/bin/java
+ERGO_JAR=/opt/ergo/ergo.jar
+
 # Where the node writes this instance's configuration. `__config__` at the root of the
 # filesystem is the packer's default (`config_declaration.path`, PACKING.md), and
 # `.service/service.json` does not override it.
@@ -60,6 +66,10 @@ REST_PORT=9053
 # a `__config__` carries one `network_resolution` per declared network, in no promised
 # order, and this service may one day declare more than one.
 POW_TAG='pow:ergo'
+
+# The tag that nodo puts on the REST slot of a resolved peer
+# (`pow_networks.REST_SLOT_TAG`). The REST API is not a P2P peer.
+REST_SLOT_TAG='ergo-rest'
 
 ERGO_PID=''
 STOPPING=''
@@ -84,7 +94,11 @@ read_environment() {
     NETWORK="${ERGO_NETWORK:-}"
     NETWORK="${NETWORK#"${NETWORK%%[![:space:]]*}"}"
     NETWORK="${NETWORK%"${NETWORK##*[![:space:]]}"}"
-    NETWORK="${NETWORK:-mainnet}"
+    NETWORK_FROM_DEFAULT=false
+    if [ -z "$NETWORK" ]; then
+        NETWORK=mainnet
+        NETWORK_FROM_DEFAULT=true
+    fi
     case "$NETWORK" in
         mainnet|testnet) : ;;
         *) fail "ERGO_NETWORK='${NETWORK}' is not one of mainnet, testnet" ;;
@@ -93,6 +107,13 @@ read_environment() {
     if [ -z "${ERGO_API_KEY:-}" ]; then
         fail "ERGO_API_KEY is empty. Ergo's REST API refuses every authenticated route without one, and this service has no other way to reach the wallet; a node with no key is a node nothing can use."
     fi
+    # .curlrc writes this between quotes. A quote, a backslash or a newline
+    # would change the curl config.
+    case "${ERGO_API_KEY}" in
+        *\"*|*$'\\'*|*$'\n'*|*$'\r'*)
+            fail "ERGO_API_KEY contains a quote, a backslash or a newline"
+            ;;
+    esac
 
     # BLAKE2b-256, hex, which is what `scorex.restApi.apiKeyHash` holds. `b2sum -l 256`
     # is coreutils', from the base image: OpenSSL 3.0 offers BLAKE2b at 512-bit output
@@ -107,12 +128,40 @@ read_environment() {
 
     NODE_NAME="${ERGO_NODE_NAME:-}"
     NODE_NAME="${NODE_NAME:-celaut-ergo-node}"
-
-    MAX_HEAP="${ERGO_MAX_HEAP:-3G}"
-    case "$MAX_HEAP" in
-        [1-9]*[MmGg]) : ;;
-        *) fail "ERGO_MAX_HEAP='${MAX_HEAP}' is not a JVM heap size such as 3G or 2048M" ;;
+    # ergo.conf writes this between quotes. A quote or a newline would change
+    # the HOCON, so only a short P2P name is accepted.
+    case "$NODE_NAME" in
+        *[!A-Za-z0-9._:-]*)
+            fail "ERGO_NODE_NAME is not a safe P2P name. Use letters, digits, dot, underscore, colon or hyphen."
+            ;;
     esac
+
+    DATA_DIR="${ERGO_DATADIR:-/data}"
+    case "$DATA_DIR" in
+        /*) : ;;
+        *) fail "ERGO_DATADIR must be an absolute path" ;;
+    esac
+    case "$DATA_DIR" in
+        *[!A-Za-z0-9/._-]*)
+            fail "ERGO_DATADIR contains a character that is not safe in ergo.conf"
+            ;;
+    esac
+    CONF_PATH="${DATA_DIR}/ergo.conf"
+    CURL_RC="${DATA_DIR}/.curlrc"
+
+    # The JVM heap. Empty means a share of the RAM of the guest, which is the
+    # `at_init.mem_limit` of service.json. nodo boots the microVM with that RAM and does
+    # not add more unless the service asks for it, so a fixed default would be too
+    # large on a small instance and too small on a large one. The rest of the RAM is
+    # for RocksDB, the JIT and the threads, which are outside the heap.
+    MAX_HEAP="${ERGO_MAX_HEAP:-}"
+    HEAP_FLAG='-XX:MaxRAMPercentage=60.0'
+    if [ -n "$MAX_HEAP" ]; then
+        case "$MAX_HEAP" in
+            *[!0-9MmGg]*|[!1-9]*|*[0-9]|*[MmGg]*[MmGg]*) fail "ERGO_MAX_HEAP='${MAX_HEAP}' is not a JVM heap size such as 3G or 2048M" ;;
+        esac
+        HEAP_FLAG="-Xmx${MAX_HEAP}"
+    fi
 
     BLOCKS_TO_KEEP="${ERGO_BLOCKS_TO_KEEP:-1440}"
     case "$BLOCKS_TO_KEEP" in
@@ -127,6 +176,12 @@ read_environment() {
     MNEMONIC="${ERGO_WALLET_MNEMONIC:-}"
     if [ -n "$MNEMONIC" ] && [ -z "${ERGO_WALLET_PASSWORD:-}" ]; then
         fail "ERGO_WALLET_MNEMONIC is set but ERGO_WALLET_PASSWORD is not. The node encrypts its keystore with that password and asks for it on every unlock; it is required by /wallet/restore and cannot be defaulted to something guessable."
+    fi
+    # A wallet without ERGO_NETWORK would join mainnet. That is the default for a
+    # read-only node, and it is the wrong default for a key. The operator must
+    # name the chain.
+    if [ -n "$MNEMONIC" ] && [ "$NETWORK_FROM_DEFAULT" = true ]; then
+        fail "ERGO_WALLET_MNEMONIC needs an explicit ERGO_NETWORK. Set testnet or mainnet. Unset would join mainnet."
     fi
 
     # A wallet and a pruned node are mutually exclusive, and it is Ergo that says so,
@@ -163,6 +218,16 @@ read_environment() {
         # config it stops on, and this service found that out by being stopped by it.
         FAST_BOOTSTRAP=false
     fi
+
+    # The NiPoPoW bootstrap also needs `ergo.chain.genesisId`, and only mainnet.conf
+    # sets it. On testnet, Ergo 6.0.7 stops at start with "nodeSettings.popowBootstrap
+    # is set but genesisId is not" (ErgoSettingsReader.consistentSettings). So testnet
+    # keeps the UTXO snapshot bootstrap and downloads every header. The testnet chain
+    # is small, thus this costs little.
+    NIPOPOW_BOOTSTRAP="$FAST_BOOTSTRAP"
+    if [ "$NETWORK" = testnet ]; then
+        NIPOPOW_BOOTSTRAP=false
+    fi
 }
 
 # ------------------------------------------------------------- peers from __config__
@@ -183,11 +248,23 @@ read_environment() {
 #   across protobuf versions, which is what makes `awk` an honest tool for it rather
 #   than a clever one.
 #
-# The `awk` program tracks brace depth so that only a top-level `network_resolution`
-# block is considered -- `gateway` carries `uri` blocks too, and they are not peers --
-# and within one such block it emits an address only for a `uri` that had both an `ip`
-# and a `port`. Proto3 omits fields at their default, so a `uri` with no `port` line is
-# one whose port is 0, which is not an address to dial.
+# The `awk` program tracks the path of blocks it is in, as protoc prints them: one
+# opening or closing brace per line, always the last token. It reads only a top-level
+# `network_resolution` whose own `tags` (depth 1) contain `pow:ergo` exactly. The
+# `gateway` and other resolutions also carry `uri` blocks, and they are not peers.
+#
+# Inside it, one `peer_instances` is one peer. nodo gives each peer a P2P slot, tagged
+# `ergo-p2p` in `Api.Slot.protocol_stack`, and can also give a REST slot, tagged
+# `ergo-rest` (src/manager/pow_networks.py). The REST API is not a P2P peer, so a
+# `uri_slot` whose `internal_port` is the port of an `ergo-rest` slot is skipped. For
+# a guest that declares only `ergo-p2p`, nodo removes the REST slot before it writes
+# `__config__`. The skip here is a second guard, and it keeps the older one-slot shape
+# readable.
+#
+# Each address must be an IPv4 or IPv6 literal and a port from 1 to 65535. Anything
+# else is not dialled and not written into `ergo.conf`, where a quote in it would
+# change the HOCON. Proto3 omits a field at its default, so a `uri` with no `port`
+# line has port 0.
 #
 # Everything this function says goes to stderr, because its STDOUT IS THE PEER LIST: the
 # caller reads it with `$(...)`, and a log line on the same stream would be parsed as an
@@ -212,20 +289,51 @@ read_pow_peers() {
     fi
 
     printf '%s\n' "$decoded" \
-        | awk -v want="$POW_TAG" '
-            # Depth of the block we are inside, counting braces as protoc prints them:
-            # one opening or closing brace per line, always the last token.
+        | awk -v want="$POW_TAG" -v rest_tag="$REST_SLOT_TAG" '
+            function value(line) {
+                sub(/^[^"]*"/, "", line); sub(/"[[:space:]]*$/, "", line)
+                return line
+            }
+            function new_peer() {
+                split("", rest_ports); n = 0
+            }
+            function valid(ip, port) {
+                if (port !~ /^[0-9]+$/ || port < 1 || port > 65535) return 0
+                if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 1
+                return (ip ~ /^[0-9A-Fa-f:.]+$/ && index(ip, ":") > 0)
+            }
             /\{[[:space:]]*$/ {
                 depth++
-                if (depth == 1) {
-                    inres = ($1 == "network_resolution" || $1 == "network_resolution:")
-                    matched = 0
-                }
-                if (inres && $1 == "uri") { ip = ""; port = "" }
+                block[depth] = $1
+                if (depth == 1) { inres = ($1 == "network_resolution"); matched = 0 }
+                if (!inres) next
+                if (depth == 2 && $1 == "peer_instances") new_peer()
+                if (depth == 4 && block[3] == "api" && $1 == "slot") { slot_port = 0; slot_rest = 0 }
+                if (depth == 3 && $1 == "uri_slot") internal = 0
+                if (depth == 4 && block[3] == "uri_slot" && $1 == "uri") { ip = ""; port = 0 }
                 next
             }
             /^[[:space:]]*\}[[:space:]]*$/ {
-                if (inres && depth == 1) { inres = 0; matched = 0 }
+                if (inres && depth == 4 && block[3] == "api" && block[4] == "slot" && slot_rest)
+                    rest_ports[slot_port] = 1
+                if (inres && depth == 4 && block[3] == "uri_slot" && block[4] == "uri") {
+                    n++; uri_ip[n] = ip; uri_port[n] = port; uri_internal[n] = internal
+                }
+                if (inres && depth == 2 && block[2] == "peer_instances" && matched) {
+                    for (i = 1; i <= n; i++) {
+                        if (uri_internal[i] in rest_ports) continue
+                        if (!valid(uri_ip[i], uri_port[i])) {
+                            printf "[ergo-node] skipped a pow:ergo address that is not an IP literal and a port\n" > "/dev/stderr"
+                            continue
+                        }
+                        a = uri_ip[i]
+                        # Ergo writes an IPv6 literal in brackets, as its own
+                        # mainnet.conf does, so knownPeers can split the port off.
+                        if (index(a, ":") > 0) a = "[" a "]"
+                        print a ":" uri_port[i]
+                    }
+                }
+                if (depth == 1) inres = 0
                 depth--
                 next
             }
@@ -233,30 +341,15 @@ read_pow_peers() {
             # tags is field 1 of NetworkResolution and peer_instances is field 2, so a
             # tag is always printed before the peers it qualifies. The match is on the
             # whole tag, never a prefix: `pow:ergo-testnet` is a different domain.
-            $1 == "tags:" {
-                v = $0
-                sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v)
-                if (v == want) matched = 1
+            depth == 1 && $1 == "tags:" { if (value($0) == want) matched = 1; next }
+            depth == 4 && block[4] == "slot" && $1 == "port:" { slot_port = $2; next }
+            depth == 5 && block[4] == "slot" && block[5] == "protocol_stack" && $1 == "tags:" {
+                if (value($0) == rest_tag) slot_rest = 1
                 next
             }
-            $1 == "ip:" {
-                v = $0
-                sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v)
-                ip = v
-                next
-            }
-            $1 == "port:" {
-                port = $2
-                if (matched && ip != "" && port != "" && port != "0") {
-                    # Ergo writes an IPv6 literal bracketed, as its own mainnet.conf
-                    # does. A resolver that produced a bare v6 address would otherwise
-                    # give `scorex.network.knownPeers` a string it cannot split.
-                    if (index(ip, ":") > 0 && substr(ip, 1, 1) != "[") ip = "[" ip "]"
-                    print ip ":" port
-                }
-                ip = ""; port = ""
-                next
-            }
+            depth == 3 && block[3] == "uri_slot" && $1 == "internal_port:" { internal = $2; next }
+            depth == 4 && block[4] == "uri" && $1 == "ip:" { ip = value($0); next }
+            depth == 4 && block[4] == "uri" && $1 == "port:" { port = $2; next }
         ' \
         | awk '!seen[$0]++'
 }
@@ -299,7 +392,7 @@ write_configuration() {
         printf '%s\n' '      p2pUtxoSnapshots = 2'
         printf '%s\n' '    }'
         printf '%s\n' '    nipopow {'
-        printf '      nipopowBootstrap = %s\n' "$FAST_BOOTSTRAP"
+        printf '      nipopowBootstrap = %s\n' "$NIPOPOW_BOOTSTRAP"
         printf '%s\n' '      p2pNipopows = 2'
         printf '%s\n' '    }'
         printf '%s\n' '  }'
@@ -565,7 +658,7 @@ main() {
     # the genesis id, the magic bytes and the P2P port (9030 / 9023). Those are the
     # chain's constants and not this service's business; what this service overrides is
     # in the file named by `-c`.
-    java "-Xmx${MAX_HEAP}" -jar /opt/ergo/ergo.jar "--${NETWORK}" -c "$CONF_PATH" &
+    "$JAVA_BIN" "$HEAP_FLAG" -jar "$ERGO_JAR" "--${NETWORK}" -c "$CONF_PATH" &
     ERGO_PID=$!
 
     trap 'on_signal TERM' TERM

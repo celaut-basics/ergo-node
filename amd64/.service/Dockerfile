@@ -1,3 +1,9 @@
+# linux/amd64 pack root. nodo builds it with --opt platform=linux/amd64 (from
+# service.json). The base image pin is a multi-arch index, so the same pin
+# resolves to the linux/amd64 image. Only the Temurin JRE tarball (x64) and its
+# checksum differ from the other pack root. The Debian pins below exist at the
+# same versions on amd64 and arm64.
+#
 # Every dependency is pinned, and the three that matter are pinned by digest or by
 # checksum. This service is content-addressed -- two packs of the same source tree must
 # produce the same image -- and when ERGO_WALLET_MNEMONIC is set the image holds a
@@ -24,18 +30,22 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 # release notes and Docker images run it on 17; 21 works too and is a bigger change
 # than this file should make on its own.
 #
-#   curl -s 'https://api.adoptium.net/v3/assets/feature_releases/17/ga?architecture=aarch64&image_type=jre&jvm_impl=hotspot&os=linux&page_size=1&vendor=eclipse' \
+#   curl -s 'https://api.adoptium.net/v3/assets/feature_releases/17/ga?architecture=x64&image_type=jre&jvm_impl=hotspot&os=linux&page_size=1&vendor=eclipse' \
 #     | jq -r '.[0].binaries[0].package | .link, .checksum'
+#
+# The guest does not get the ENV of this file. nodo exports only the filesystem, and
+# its /init sets PATH to the standard directories. Thus the entrypoint calls
+# /opt/java/bin/java by its full path, and the link in /usr/local/bin is only for an
+# operator in a shell.
 ARG TEMURIN_VERSION=17.0.20.1_1
-ARG TEMURIN_SHA256=b8efcd5acc9109fe8d35bed132499643048a257b4f6042906ece37d03c839d77
-ADD https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jre_aarch64_linux_hotspot_${TEMURIN_VERSION}.tar.gz /tmp/jre.tar.gz
+ARG TEMURIN_SHA256=0b2b640e3046b64c8ec504de0ab9d91bb5610182bda21fad454681ce54d45a62
+ADD https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jre_x64_linux_hotspot_${TEMURIN_VERSION}.tar.gz /tmp/jre.tar.gz
 RUN echo "${TEMURIN_SHA256}  /tmp/jre.tar.gz" | sha256sum -c - \
     && mkdir -p /opt/java \
     && tar -xzf /tmp/jre.tar.gz -C /opt/java --strip-components=1 \
     && rm -f /tmp/jre.tar.gz \
+    && ln -s /opt/java/bin/java /usr/local/bin/java \
     && /opt/java/bin/java -version
-ENV JAVA_HOME=/opt/java
-ENV PATH="/opt/java/bin:${PATH}"
 
 # ------------------------------------------------------------------------ the node
 # The Ergo reference client, from the release the project publishes.
@@ -108,5 +118,11 @@ RUN apt-get update \
 # built from, and a copy in the tree is a copy that shows up in a diff when it drifts.
 # `buffer.proto` is here only because `celaut.proto` imports it; nothing in this service
 # reads a Buffer.
-COPY service /service
+#
+# The build context is `.service/`, and the packer puts the `include` items of
+# pack_config.json in `.service/service/`. Thus the source directory is
+# `service/service` in the context. The packer changes an origin that starts with `./`
+# to `service/...`, so `./service` is that directory. A bare `service` is not changed
+# and copies the wrapper directory, which puts the script at /service/service/.
+COPY ./service /service
 RUN chmod +x /service/entrypoint.sh && mkdir -p /data

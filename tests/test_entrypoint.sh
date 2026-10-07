@@ -12,11 +12,11 @@
 # environment, which the script reads to stop short of starting a JVM. Testing a copy of
 # the logic would test the copy.
 #
-# The fixtures in `tests/fixtures/` are real serialized `celaut.ConfigurationFile`
-# messages, built with nodo's own `protos/celaut_pb2.py` -- see `tests/fixtures/README.md`
-# for the exact command. They are bytes, committed, so this test needs no Python and no
-# nodo checkout: `bash`, `protoc`, `awk`, and `b2sum` from coreutils, which is what the
-# image has.
+# The fixtures in `tests/fixtures/` are `.txtpb` sources. This script encodes each
+# one with `protoc --encode=celaut.ConfigurationFile` and the vendored
+# `service/celaut.proto` -- see `tests/fixtures/README.md`. The test needs no Python
+# and no nodo checkout: `bash`, `protoc`, `awk`, and `b2sum` from coreutils, which is
+# what the image has.
 #
 # Run with `bash tests/test_entrypoint.sh`. Nothing is started, nothing is fetched, and
 # no network is touched.
@@ -35,16 +35,19 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 SERVICE="${HERE}/../service"
 
-PASSED=0
-FAILED=0
+# One line per check, in a file and not in a variable: several checks run in a
+# subshell, and a counter that a subshell increments is lost when it exits. A failure
+# there was not counted.
+RESULTS=$(mktemp)
+trap 'rm -f "$RESULTS"' EXIT
 
 ok() {
-    PASSED=$(( PASSED + 1 ))
+    echo ok >> "$RESULTS"
     printf '  ok    %s\n' "$1"
 }
 
 no() {
-    FAILED=$(( FAILED + 1 ))
+    echo no >> "$RESULTS"
     printf '  FAIL  %s\n' "$1"
     printf '        expected: %s\n' "$2"
     printf '        got:      %s\n' "$3"
@@ -88,8 +91,21 @@ SERVICE_DIR="$SERVICE"
 # ------------------------------------------------------------------- the peer list
 echo 'reading pow:ergo peers out of a __config__'
 
-CONFIG_FILE="${HERE}/fixtures/config-three-peers"
-peers=$(read_pow_peers)
+# The fixtures are text-format sources. Encode each one into the binary
+# `celaut.ConfigurationFile` that nodo writes, with the same vendored schema.
+FIXTURES=$(mktemp -d)
+trap 'rm -f "$RESULTS"; rm -rf "$FIXTURES"' EXIT
+for source in "${HERE}"/fixtures/*.txtpb; do
+    name=$(basename "$source" .txtpb)
+    if ! protoc --proto_path="$SERVICE" --encode=celaut.ConfigurationFile \
+                "${SERVICE}/celaut.proto" < "$source" > "${FIXTURES}/${name}"; then
+        printf 'cannot encode %s\n' "$source" >&2
+        exit 2
+    fi
+done
+
+CONFIG_FILE="${FIXTURES}/config-three-peers"
+peers=$(read_pow_peers 2>/dev/null)
 
 is "$peers" '213.239.193.208:9030
 159.65.11.55:9030
@@ -100,24 +116,40 @@ is "$peers" '213.239.193.208:9030
 # matched on the shape rather than on the enclosing tag would pick them up, and the node
 # would then try to speak Ergo's P2P protocol to the gateway it reports to.
 lacks "$peers" '93.184.216.34' 'a peer of another network is not read as one of ours'
-lacks "$peers" '10.0.0.1' 'the gateway instance is not read as a peer'
+lacks "$peers" '192.168.200.1' 'the gateway instance is not read as a peer'
+# The second peer also has a REST slot, as in a Gateway.ResolveNetwork answer.
+lacks "$peers" ':9053' 'the REST slot of a peer is not read as a P2P address'
 
-CONFIG_FILE="${HERE}/fixtures/config-no-peers"
+CONFIG_FILE="${FIXTURES}/config-rest-only"
+is "$(read_pow_peers 2>/dev/null)" '' 'a peer with only a REST slot yields nothing'
+
+CONFIG_FILE="${FIXTURES}/config-no-peers"
 is "$(read_pow_peers)" '' 'a pow:ergo resolution with no peers yields nothing'
 
-CONFIG_FILE="${HERE}/fixtures/config-other-network"
+CONFIG_FILE="${FIXTURES}/config-other-network"
 is "$(read_pow_peers)" '' 'a __config__ with no pow:ergo resolution at all yields nothing'
 
-CONFIG_FILE="${HERE}/fixtures/config-duplicate-peers"
+CONFIG_FILE="${FIXTURES}/config-nested-tag"
+is "$(read_pow_peers)" '' 'pow:ergo as a slot tag of another network does not select it'
+
+CONFIG_FILE="${FIXTURES}/config-duplicate-peers"
 is "$(read_pow_peers)" '213.239.193.208:9030
 159.65.11.55:9030' 'the same address twice is one peer'
 
-CONFIG_FILE="${HERE}/fixtures/config-similar-tag"
+CONFIG_FILE="${FIXTURES}/config-similar-tag"
 is "$(read_pow_peers)" '198.51.100.7:9030' 'the tag is matched whole: pow:ergo-testnet is a different domain'
 
-CONFIG_FILE="${HERE}/fixtures/config-multi-uri"
+CONFIG_FILE="${FIXTURES}/config-multi-uri"
 is "$(read_pow_peers)" '203.0.113.5:9030
 203.0.113.6:9030' 'every uri of a peer instance is read, not just the first'
+
+# An address goes into ergo.conf between quotes. Only an IP literal and a port
+# from 1 to 65535 get there.
+CONFIG_FILE="${FIXTURES}/config-bad-addresses"
+is "$(read_pow_peers 2>/dev/null)" '198.51.100.9:9030' \
+   'a hostname, a quote, port 0, -1 or 70000 is not a peer'
+contains "$(read_pow_peers 2>&1 >/dev/null)" 'skipped a pow:ergo address' \
+         'and each skipped address is said on stderr'
 
 # stdout only. The caller reads this function with `$(...)`, so anything it says about
 # itself has to be on stderr -- a log line on stdout would be parsed as an address and
@@ -127,9 +159,20 @@ is "$(read_pow_peers 2>/dev/null)" '' 'a missing __config__ is not fatal -- a de
 contains "$(read_pow_peers 2>&1 >/dev/null)" 'nothing resolved this instance' \
          'and it says so, on stderr, where it cannot become a peer'
 
-CONFIG_FILE="${HERE}/fixtures/config-three-peers"
-is "$(read_pow_peers 2>&1 | grep -c '^\[ergo-node\]' || true)" '0' \
+CONFIG_FILE="${FIXTURES}/config-bad-addresses"
+is "$(read_pow_peers 2>&1 | grep -c '^\[ergo-node\]' || true)" '5' \
    'nothing this function logs can end up in the peer list'
+is "$(read_pow_peers 2>/dev/null | grep -c '^\[ergo-node\]' || true)" '0' \
+   'and stdout carries addresses only'
+
+# A file that is not a ConfigurationFile is a loud failure, not "no peers".
+printf '\377\377\377\377' > "${FIXTURES}/garbage"
+CONFIG_FILE="${FIXTURES}/garbage"
+# The sourced entrypoint turns on `set -e`, so the status is taken with `||`.
+garbage_status=0
+garbage_out=$( (ERGO_PID=''; read_pow_peers) 2>&1 ) || garbage_status=$?
+is "$garbage_status" '1' 'a __config__ that does not decode stops the start'
+contains "$garbage_out" 'is not a celaut.ConfigurationFile' 'and says why'
 
 # ------------------------------------------------------------- the rendered config
 echo
@@ -144,6 +187,7 @@ BLOCKS_TO_KEEP=1440
 API_KEY_HASH='324dcf027dd4a30a932c441f365a25e86b173defa4b8e58948253471b81b72cf'
 ERGO_API_KEY='hello'
 FAST_BOOTSTRAP=true
+NIPOPOW_BOOTSTRAP=true
 
 write_configuration '213.239.193.208:9030
 159.65.11.55:9030' >/dev/null
@@ -176,6 +220,7 @@ lacks "$empty_rendered" '213.239.193.208' 'and carries nothing over from the pre
 
 # The bootstrap settings follow the wallet, because Ergo will not have both.
 FAST_BOOTSTRAP=false
+NIPOPOW_BOOTSTRAP=false
 BLOCKS_TO_KEEP=-1
 write_configuration '' >/dev/null
 unpruned=$(cat "$CONF_PATH")
@@ -186,6 +231,7 @@ contains "$unpruned" 'utxoBootstrap = false' 'a wallet-bearing node writes utxoB
 contains "$unpruned" 'nipopowBootstrap = false' 'and nipopowBootstrap = false, which Ergo requires alongside it'
 contains "$unpruned" 'blocksToKeep = -1' 'and keeps every block, which is what unpruned means'
 FAST_BOOTSTRAP=true
+NIPOPOW_BOOTSTRAP=true
 BLOCKS_TO_KEEP=1440
 
 rm -rf "$DATA_DIR"
@@ -226,7 +272,7 @@ echo 'the environment contract'
 env_error() {   # runs read_environment with the given assignments, prints its message
     (
         unset ERGO_API_KEY ERGO_NETWORK ERGO_MAX_HEAP ERGO_BLOCKS_TO_KEEP \
-              ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD
+              ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD ERGO_NODE_NAME ERGO_DATADIR
         eval "$1"
         ERGO_PID=''
         read_environment 2>&1
@@ -235,10 +281,31 @@ env_error() {   # runs read_environment with the given assignments, prints its m
 
 contains "$(env_error "ERGO_API_KEY=''")" 'ERGO_API_KEY is empty' \
          'a missing API key is refused with a reason'
+contains "$(env_error "ERGO_API_KEY='k\"k'")" 'quote, a backslash or a newline' \
+         'a quote in the API key is refused before it reaches .curlrc'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=signet")" 'is not one of mainnet, testnet' \
          'an unknown network is refused'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_NODE_NAME='x\"y'")" 'is not a safe P2P name' \
+         'a quote in the node name is refused before it reaches ergo.conf'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_DATADIR=data")" 'must be an absolute path' \
+         'a relative data dir is refused'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_DATADIR='/tmp/x\"y'")" 'is not safe in ergo.conf' \
+         'a quote in the data dir is refused'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_MAX_HEAP=lots")" 'is not a JVM heap size' \
          'a malformed heap size is refused before the JVM sees it'
+for bad in 3 3GB 1G2G G 0G '3 G'; do
+    contains "$(env_error "ERGO_API_KEY=k; ERGO_MAX_HEAP='${bad}'")" 'is not a JVM heap size' \
+             "the heap size '${bad}' is refused"
+done
+(
+    unset ERGO_MAX_HEAP
+    ERGO_API_KEY=k read_environment
+    is "$HEAP_FLAG" '-XX:MaxRAMPercentage=60.0' 'with no heap size, the heap is a share of the RAM of the guest'
+)
+(
+    ERGO_API_KEY=k ERGO_MAX_HEAP=2048m read_environment
+    is "$HEAP_FLAG" '-Xmx2048m' 'a heap size is given to the JVM as -Xmx'
+)
 contains "$(env_error "ERGO_API_KEY=k; ERGO_BLOCKS_TO_KEEP=some")" 'whole number of blocks' \
          'a malformed blocksToKeep is refused'
 contains "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'")" 'ERGO_WALLET_PASSWORD is not' \
@@ -257,17 +324,20 @@ is "$(env_error "ERGO_API_KEY=k")" '' 'the minimal environment -- an API key -- 
 # checking the status code, because `curl` exits 0 on a 400 -- logged "wallet restored
 # from the mnemonic". Both halves of that are pinned, here and in the rendered config.
 contains "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p")" \
+         'needs an explicit ERGO_NETWORK' \
+         'a wallet without ERGO_NETWORK is refused rather than joined to mainnet'
+contains "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=testnet; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p")" \
          'needs an unpruned node' \
          'a wallet on a pruned node is refused BEFORE the JVM starts, not as an HTTP 400 later'
 
-is "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p; ERGO_BLOCKS_TO_KEEP=-1")" \
+is "$(env_error "ERGO_API_KEY=k; ERGO_NETWORK=testnet; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSWORD=p; ERGO_BLOCKS_TO_KEEP=-1")" \
    '' 'a wallet with ERGO_BLOCKS_TO_KEEP=-1 is accepted'
 
 # `blocksToKeep = -1` is only half of `isFullBlocksPruned`. `utxoBootstrap` is the other
 # half and is on by default here, so the same check has to turn it off -- otherwise the
 # configuration written is still a pruned one and the restore still fails.
 (
-    ERGO_API_KEY=k ERGO_BLOCKS_TO_KEEP=-1 \
+    ERGO_API_KEY=k ERGO_NETWORK=testnet ERGO_BLOCKS_TO_KEEP=-1 \
     ERGO_WALLET_MNEMONIC='a b c' ERGO_WALLET_PASSWORD=p read_environment
     is "$FAST_BOOTSTRAP" 'false' \
        'and it turns the fast bootstrap off, which is the other half of that rule'
@@ -276,6 +346,15 @@ is "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='a b c'; ERGO_WALLET_PASSW
     unset ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD
     ERGO_API_KEY=k read_environment
     is "$FAST_BOOTSTRAP" 'true' 'with no wallet asked for, the fast bootstrap stays on'
+    is "$NIPOPOW_BOOTSTRAP" 'true' 'and on mainnet the NiPoPoW bootstrap is on too'
+)
+# testnet.conf sets no ergo.chain.genesisId, and Ergo refuses nipopowBootstrap
+# without one. The UTXO snapshot bootstrap does not need it and stays on.
+(
+    unset ERGO_WALLET_MNEMONIC ERGO_WALLET_PASSWORD
+    ERGO_API_KEY=k ERGO_NETWORK=testnet read_environment
+    is "$NIPOPOW_BOOTSTRAP" 'false' 'on testnet the NiPoPoW bootstrap is off'
+    is "$FAST_BOOTSTRAP" 'true' 'and the UTXO snapshot bootstrap stays on'
 )
 
 # A mnemonic must not appear in anything read_environment prints, ever. It is the one
@@ -284,5 +363,7 @@ lacks "$(env_error "ERGO_API_KEY=k; ERGO_WALLET_MNEMONIC='abandon abandon about'
       'the mnemonic is never quoted back, not even in the error about it'
 
 echo
+PASSED=$(grep -c '^ok$' "$RESULTS" || true)
+FAILED=$(grep -c '^no$' "$RESULTS" || true)
 printf '%s passed, %s failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]

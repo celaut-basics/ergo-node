@@ -1,0 +1,74 @@
+{
+    "tag": "ergo-node",
+    "architecture": "linux/amd64",
+    "init": {
+        "entry_path": ["service", "entrypoint.sh"]
+    },
+    "api": [
+        {
+            "port": 9053,
+            "transport": "tcp",
+            "protocol": [
+                "http"
+            ]
+        }
+    ],
+    "envs": [
+        "ERGO_API_KEY",
+        "ERGO_NETWORK",
+        "ERGO_DATADIR",
+        "ERGO_NODE_NAME",
+        "ERGO_MAX_HEAP",
+        "ERGO_BLOCKS_TO_KEEP",
+        "ERGO_WALLET_MNEMONIC",
+        "ERGO_WALLET_MNEMONIC_PASSPHRASE",
+        "ERGO_WALLET_PASSWORD",
+        "ERGO_BLOCK_ID",
+        "ERGO_MIN_CUMULATIVE_DIFFICULTY",
+        "ERGO_MIN_HEIGHT"
+    ],
+    "network": [
+        {
+            "tags": [
+                "pow:ergo"
+            ],
+            "prose": "Peers of the Ergo proof-of-work network. WHAT ERGO IS, which is what the keys below fix and what no instantiation of this service may change: a proof-of-work blockchain whose mining puzzle is Autolykos v2 (pow.consensus), targeting one block every 120 seconds (pow.target_block_time_s); whose ledger is the extended UTXO model (ledger.model) -- boxes carrying a value, a guarding script and typed registers, spent whole and replaced, rather than accounts holding mutable balances; whose guarding scripts are ErgoScript compiled to Sigma propositions (ledger.scripting), a deliberately NON-Turing-complete language of sigma-protocol statements, so that what it costs to verify a spend is knowable before it is run; whose native unit is ERG (ledger.native_asset) with a finite emission that reduces linearly (ledger.emission); and whose other assets are EIP-4 tokens (ledger.token_standard) carried in the same boxes as ERG rather than by separate contracts. Those are the properties that distinguish Ergo from Bitcoin -- which is UTXO but not extended, and whose script language holds no sigma propositions -- and from a plain peer-to-peer protocol like BitTorrent, which has no chain, no work behind it and nothing to be in consensus about. WHICH ERGO NETWORK, by contrast, is not this file's decision: pow.block_id, pow.min_cumulative_difficulty and pow.min_height are left as ${ERGO_BLOCK_ID}, ${ERGO_MIN_CUMULATIVE_DIFFICULTY} and ${ERGO_MIN_HEIGHT}, and whoever instantiates this service supplies them. Mainnet, testnet and a private low-difficulty chain are all Ergo by every key above and are told apart only by those three, so hardcoding them here would have been this service choosing a chain on its instantiator's behalf -- which is exactly how an instance ends up peered to a chain nobody wanted. Set all three and the node resolves the network at launch and writes the peers into this instance's __config__, as the ConfigurationFile.NetworkResolution whose tags contain 'pow:ergo'; service/entrypoint.sh reads every peer_instances[].uri_slot[].uri out of it and writes them into scorex.network.knownPeers before starting the jar. Leave any of them unset and the node defers this network instead: it resolves nothing, omits the entry, the launch proceeds normally and the node starts with knownPeers = [] -- see nodo#385. That is not an error and it is not a fallback to a hardcoded list; nothing here names a host and nothing here asks for open egress. The three belong together: min_cumulative_difficulty should be the work the chain had reached AT the block named, not at any later tip, so that the ask reads 'a peer that has at least caught up to the block I named' and does not silently get stricter as the chain moves; min_height restates the same fact in the form the resolver can check from /info alone, before it spends two more requests on the block itself. pow.max_tip_age_s is deliberately NOT templated: it selects no chain -- every Ergo network produces blocks on the same 120-second target, so a peer stalled an hour behind is useless for bootstrapping whichever one it is on -- and it is what keeps a pinned block from decaying into a weaker and weaker ask as the chain grows past it.",
+            "formal": {
+                "pow.chain": "ergo",
+                "pow.consensus": "autolykos-v2",
+                "pow.target_block_time_s": "120",
+                "ledger.model": "extended-utxo",
+                "ledger.scripting": "ergoscript-sigma",
+                "ledger.emission": "finite-linear-reduction",
+                "ledger.native_asset": "ERG",
+                "ledger.token_standard": "eip-4",
+                "pow.block_id": "${ERGO_BLOCK_ID}",
+                "pow.min_cumulative_difficulty": "${ERGO_MIN_CUMULATIVE_DIFFICULTY}",
+                "pow.min_height": "${ERGO_MIN_HEIGHT}",
+                "pow.max_tip_age_s": "3600"
+            },
+            "protocol_stack": [
+                {
+                    "tags": [
+                        "ergo-p2p"
+                    ],
+                    "prose": "Ergo's own peer-to-peer protocol, which is what a knownPeers entry is dialled with -- not the REST API this service exposes on 9053. The distinction matters at the resolver's end: a peer is verified over REST and has to be reached over P2P, and those are two ports on the same host."
+                }
+            ]
+        }
+    ],
+    "resources": {
+        "at_init": {
+            "mem_limit": 4000000000,
+            "disk_space": 8000000000,
+            "cpu_period": 100000,
+            "cpu_quota": 200000
+        },
+        "at_most": {
+            "mem_limit": 4000000000,
+            "disk_space": 8000000000,
+            "cpu_period": 100000,
+            "cpu_quota": 200000
+        }
+    }
+}

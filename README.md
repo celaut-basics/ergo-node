@@ -443,9 +443,15 @@ came from. In order:
 - **Nothing leaks.** `docker logs | grep -c` for the mnemonic, the API key and the
   spending password: **0** on every run.
 
-What is still **not verified**: a full chain sync (the Docker runs above reached height 0),
-and **`nodo pack` / `nodo execute` on a real nodo**. This audit host has no KVM. Nothing
-in this tree was packed or launched on a node.
+On a real node (x86_64 with KVM, nodo `dev` `f14a1447`, 2026-10-06), both pack roots
+pack. The amd64 service does not start on that node: the packer stores `/usr/bin/awk` as
+a link to a path of the packing host, so the entrypoint stops with `awk: command not
+found` (nodo [#485](https://github.com/celaut-project/nodo/issues/485), fix in nodo PR
+[#499](https://github.com/celaut-project/nodo/pull/499)). With that fix, the service
+started on testnet and `/info`, `/wallet/status` and `/peers/connected` answered.
+
+What is still **not verified**: a full chain sync (the runs above reached height 0), P2P
+with real testnet peers, and an arm64 node with KVM.
 
 ## What this depends on
 
